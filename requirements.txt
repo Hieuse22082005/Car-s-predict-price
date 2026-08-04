@@ -1,0 +1,15 @@
+# --- Nhóm Core Backend & Server ---
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0.0
+
+# --- Nhóm Kết nối Database & Bảo mật ---
+supabase>=2.3.0
+python-dotenv>=1.0.0
+
+# --- Nhóm Trí tuệ nhân tạo (Huấn luyện & Dự đoán) ---
+scikit-learn>=1.3.0
+joblib>=1.3.0
+pandas>=2.0.0
+numpy>=1.24.0
+kagglehub[pandas-datasets]
