@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from routers import  auth
 # Import các router từ thư mục routers
 from routers import transactions
 
@@ -23,7 +24,7 @@ app.add_middleware(
 # ==========================================
 # Đưa toàn bộ API liên quan đến giao dịch vào prefix /api/v1/transactions
 app.include_router(transactions.router, prefix="/api/v1/transactions", tags=["Transactions"]) # Thêm các router khác vào đây khi bạn muốn mở rộng hệ thống. Ví dụ sau này bạn muốn làm thêm chức năng User, bạn chỉ cần tạo file routers/users.py và thêm:  
-
+app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
 # Ví dụ sau này bạn muốn làm thêm chức năng User, bạn chỉ cần tạo file routers/users.py và thêm:
 # from routers import users
 # app.include_router(users.router, prefix="/api/v1/users", tags=["Users"])

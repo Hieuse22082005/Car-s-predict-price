@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-
+from typing import List
 class CarValuationRequest(BaseModel):
     # Các trường dữ liệu số học
     Production_year: int
@@ -22,6 +22,15 @@ class CarValuationRequest(BaseModel):
     Colour: str
     Origin_country: str
     First_owner: str
-    
+    vehicle_conditions: List[str] = ["perfect"]
     # Thông tin Blockchain từ Frontend
-    txhash: str
+    txhash: str# Mở file schemas.py và thêm đoạn này vào
+    doors_replaced: int = 0            # Số cửa đã thay (0 đến 4)
+    scratch_severity: str = "none"     # "none" (không xước), "minor" (xước dăm), "major" (móp méo nặng)
+    previous_owners: int = 1           # Số đời chủ (1 là một chủ từ đầu)
+    ev_battery_type: str = "none"
+    license_plate: str = "Chưa có biển"
+class UserAuth(BaseModel):
+    email: str
+    password: str
+    
