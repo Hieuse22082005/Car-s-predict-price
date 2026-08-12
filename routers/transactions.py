@@ -25,7 +25,7 @@ BRAND_REPUTATION_INDEX = {
     "mercedes-benz": 0.55, # Xe sang Đức rớt giá nhanh ở VN
     "bmw": 0.50,
     "audi": 0.50,
-    "vinfast": 0.35        # Điều chỉnh lại mốc khấu hao thực tế cho VinFast
+    "vinfast": 0.9       # Điều chỉnh lại mốc khấu hao thực tế cho VinFast
 }
 
 # Hệ số tình trạng xe (1.0 là xe nguyên bản, không lỗi)
@@ -87,18 +87,55 @@ async def evaluate_and_save_transaction(data: CarValuationRequest):
     # PHẦN 2: LOGIC AI VÀ ĐỊNH GIÁ XE
     # ==========================================
     
+    # ==========================================
+    # PHẦN 2: LOGIC AI VÀ ĐỊNH GIÁ XE (ĐÃ FIX)
+    # ==========================================
+    
     if not model:
         raise HTTPException(status_code=500, detail="Mô hình AI chưa khởi tạo.")
 
-    # Loại bỏ txhash khỏi data để đưa vào model học máy
+    # 2.0 BẢNG GIÁ SÀN THỰC TẾ TẠI VIỆT NAM (Giá xe mới ~ Lăn bánh)
+    VIETNAM_CAR_MARKET_PRICE = {
+        "vinfast_vf 5": 468000000,
+        "vinfast_vf 8": 1090000000,
+        "vinfast_vf 9": 1490000000,
+        "vinfast_fadil": 350000000,
+        "vinfast_lux a2.0": 850000000,
+        "toyota_vios": 550000000,
+        "toyota_camry": 1100000000,
+        "honda_city": 550000000,
+        "honda_cr-v": 1050000000,
+        "mazda_cx-5": 850000000,
+        "mazda_mazda 3": 700000000,
+        "ford_ranger": 850000000,
+        "ford_everest": 1200000000
+    }
+
     car_data = data.model_dump(exclude={"txhash"}) 
     df_input = pd.DataFrame([car_data])
     
     try:
-        # 2.1. AI dự đoán giá gốc
-        predicted_price_pln = model.predict(df_input)[0]
-        base_price_vnd = predicted_price_pln * PLN_TO_VND_RATE
+        # 2.1. TÌM GIÁ GỐC (Ưu tiên Database nội địa trước, nếu không có mới dùng AI Châu Âu)
+        car_key = f"{data.Vehicle_brand.lower()}_{data.Vehicle_model.lower()}"
         
+        if car_key in VIETNAM_CAR_MARKET_PRICE:
+            # Nếu xe có trong dữ liệu Việt Nam -> Lấy giá niêm yết
+            base_price_vnd = VIETNAM_CAR_MARKET_PRICE[car_key]
+        else:
+            # Nếu xe lạ, dùng model AI predict
+            predicted_price_pln = model.predict(df_input)[0]
+            base_price_vnd = predicted_price_pln * PLN_TO_VND_RATE
+        
+        # Trừ khấu hao theo số năm sử dụng (Mỗi năm giảm 8%)
+        current_year = 2026 # Bạn đang set năm giả định là 2026
+        car_age = current_year - data.Production_year
+        if car_age > 0:
+            base_price_vnd *= (1 - (car_age * 0.08)) 
+            
+        # Trừ khấu hao theo số km (Cứ 10.000km trừ 1% giá trị)
+        if data.Mileage_km > 0:
+            base_price_vnd *= (1 - (data.Mileage_km / 10000 * 0.01))
+
         # 2.2. Hệ số thương hiệu
         brand_key = data.Vehicle_brand.lower()
         reputation_score = BRAND_REPUTATION_INDEX.get(brand_key, 0.7)
@@ -106,76 +143,68 @@ async def evaluate_and_save_transaction(data: CarValuationRequest):
         # 2.3. HỆ SỐ TÌNH TRẠNG XE CHI TIẾT
         condition_score = 1.0 
         
-        # A. Xử lý các lỗi nghiêm trọng trong mảng (Ngập nước, bổ máy...)
+        # A. Xử lý lỗi nghiêm trọng
         for condition in data.vehicle_conditions:
             condition_score *= CONDITION_PENALTY_INDEX.get(condition.lower(), 1.0)
             
-        # B. Xử lý số cửa đã thay (Ví dụ: mỗi cánh cửa thay bị trừ 2% giá trị)
+        # B. Số cửa đã thay (Mỗi cửa trừ 2%)
         if data.doors_replaced > 0:
             condition_score *= (1.0 - (data.doors_replaced * 0.02))
 
-        # C. Xử lý tình trạng sơn xi/xước xát
+        # C. Sơn xi/xước xát
         if data.scratch_severity == "minor":
-            condition_score *= 0.98 # Trừ 2% chi phí dọn sơn dặm
+            condition_score -= 0.02 # Trừ thẳng 2% cho chuẩn
         elif data.scratch_severity == "major":
-            condition_score *= 0.93 # Trừ 7% chi phí gò hàn, làm đồng nặng
+            condition_score -= 0.07 # Trừ thẳng 7%
             
-        # D. Xử lý số đời chủ (Mỗi đời chủ tiếp theo bị trừ 3% giá trị)
+        # D. Số đời chủ (Từ chủ thứ 2 trở đi, mỗi đời trừ 3%)
         if data.previous_owners > 1:
-            penalty_for_owners = (data.previous_owners - 1) * 0.03
-            condition_score *= (1.0 - penalty_for_owners)
+            condition_score -= ((data.previous_owners - 1) * 0.03)
             
-        # E. Xử lý đặc thù Xe Điện (Khấu hao nhanh & Phân loại pin)
-        if data.Fuel_type.lower() in ["electric", "ev"]:
+        # E. Xử lý đặc thù Xe Điện (Chỉ trừ thêm khi xe đã sử dụng cũ, xe mới không trừ)
+        if data.Fuel_type.lower() in ["electric", "ev"] and car_age > 2:
             if data.ev_battery_type == "rented":
-                # Thuê pin: Giá xe rất rẻ vì không bao gồm tài sản pin (Trừ 30%)
-                condition_score *= 0.70 
+                condition_score -= 0.15 # Giảm mức phạt xuống 15%
             elif data.ev_battery_type == "bought":
-                # Mua đứt pin: Xe điện mất giá nhanh do rủi ro chai pin so với xe xăng (Trừ 15%)
-                condition_score *= 0.85 
+                condition_score -= 0.10 # Giảm mức phạt xuống 10%
                 
-        # 2.4. ĐỊNH GIÁ BIỂN SỐ
+        # Ngăn không cho condition_score rớt xuống số âm
+        condition_score = max(condition_score, 0.3)
+
+        # 2.4. ĐỊNH GIÁ BIỂN SỐ (Tính bằng tiền Tỷ thay vì %)
+        plate_bonus_vnd = 0
         if data.license_plate:
-            # Lấy 2 ký tự đầu tiên của biển số (VD: "30A-123.45" -> "30")
             plate_prefix = str(data.license_plate)[:2] 
             
             if plate_prefix in CITY_PLATE_PREFIXES:
-                # Nếu là biển Hà Nội hoặc TP.HCM -> Tăng 1% giá trị xe
-                condition_score *= 1.01 
-                print(f"Xe biển thành phố ({plate_prefix}), phải trả thêm 1% giá trị.")
+                # Biển phố + 20 triệu
+                plate_bonus_vnd += 20000000 
                 
             if "-" in data.license_plate:
-                # Cắt lấy phần đuôi số và bỏ dấu chấm (VD: "30G-888.88" -> "88888")
                 tail_numbers = data.license_plate.split("-")[1].replace(".", "").strip()
                 
-                # A. KIỂM TRA NGŨ QUÝ (5 số y hệt nhau, VD: 88888, 99999)
+                # A. Ngũ Quý -> CỘNG TRỰC TIẾP 1 TỶ VNĐ
                 if len(tail_numbers) == 5 and len(set(tail_numbers)) == 1:
-                    condition_score *= 1.10 # Cộng 10%
-                    print(f"VIP! Biển Ngũ Quý ({tail_numbers}), cộng 10%")
+                    plate_bonus_vnd += 500000000 
+                    print(f"VIP! Biển Ngũ Quý ({tail_numbers}), cộng 1 Tỷ VNĐ")
                 
-                # B. KIỂM TRA BIỂN ĐẸP (Nếu không phải ngũ quý thì xét tiếp các giải phụ)
-                else:
-                    is_beautiful = False
+                # B. Tứ Quý -> CỘNG 300 TRIỆU VNĐ
+                elif len(tail_numbers) >= 4 and len(set(tail_numbers[-4:])) == 1:
+                    plate_bonus_vnd += 300000000
+                
+                # C. Sảnh tiến -> CỘNG 200 TRIỆU VNĐ
+                elif tail_numbers in ["12345", "23456", "34567", "45678", "56789", "6789"]:
+                    plate_bonus_vnd += 200000000
                     
-                    # - Tứ quý (4 số đuôi giống nhau, VD: 19999, hoặc biển 4 số cũ 8888)
-                    if len(tail_numbers) >= 4 and len(set(tail_numbers[-4:])) == 1:
-                        is_beautiful = True
-                    # - Sảnh tiến (VD: 12345, 56789, 34567...)
-                    elif tail_numbers in ["12345", "23456", "34567", "45678", "56789", "6789"]:
-                        is_beautiful = True
-                    # - Lộc phát, Thần tài (Đuôi kết thúc bằng 68, 86, 39, 79)
-                    elif len(tail_numbers) >= 2 and tail_numbers[-2:] in ["68", "86", "39", "79"]:
-                        is_beautiful = True
+                # D. Thần tài, lộc phát -> CỘNG 50 TRIỆU VNĐ
+                elif len(tail_numbers) >= 2 and tail_numbers[-2:] in ["68", "86", "39", "79"]:
+                    plate_bonus_vnd += 50000000
                         
-                    if is_beautiful:
-                        condition_score *= 1.03 # Cộng 3%
-                        print(f"Biển đẹp ({tail_numbers}), cộng 3%")
-                        
-        # 2.5. Chốt giá cuối cùng
-        final_predicted_price_vnd = round(base_price_vnd * reputation_score * condition_score)
+        # 2.5. CHỐT GIÁ CUỐI CÙNG = (Giá gốc * Độ uy tín * Tình trạng) + Tiền biển số
+        final_predicted_price_vnd = round(base_price_vnd * reputation_score * condition_score) + plate_bonus_vnd
         
-        # Format hiển thị
-        formatted_price_vnd = f"{final_predicted_price_vnd:,}".replace(',', '.') + " VNĐ"
+        # Format hiển thị (Ví dụ: 1.500.000.000 VNĐ)
+        formatted_price_vnd = f"{int(final_predicted_price_vnd):,}".replace(',', '.') + " VNĐ"
         
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Lỗi dự đoán: {str(e)}")
@@ -194,7 +223,8 @@ async def evaluate_and_save_transaction(data: CarValuationRequest):
         "mileage": int(data.Mileage_km), 
         "fuel_type": data.Fuel_type,
         "license_plate": data.license_plate,
-        "full_data": data.model_dump() # JSONB lưu toàn bộ thông tin
+        "full_data": data.model_dump(), # JSONB lưu toàn bộ thông tin
+        "user_email": getattr(data, 'user_email', None) or car_data.get('user_email')
     }
 
     print("--- DỮ LIỆU CHUẨN BỊ GỬI LÊN SUPABASE ---")
