@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List
+from typing import Optional, List
 class CarValuationRequest(BaseModel):
     # Các trường dữ liệu số học
     Production_year: int
@@ -30,6 +30,9 @@ class CarValuationRequest(BaseModel):
     previous_owners: int = 1           # Số đời chủ (1 là một chủ từ đầu)
     ev_battery_type: str = "none"
     license_plate: str = "Chưa có biển"
+    user_email: Optional[str] = None
+    
+    model_config = {"extra": "allow"}
 class UserAuth(BaseModel):
     email: str
     password: str
