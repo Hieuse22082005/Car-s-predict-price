@@ -5,6 +5,9 @@ import joblib
 import pandas as pd
 import os
 from utils.web3_validator import verify_transaction
+import hashlib
+import uuid
+import json
 # Import hàm kiểm tra ở Bước 2
 router = APIRouter()
 CITY_PLATE_PREFIXES = [
@@ -37,8 +40,10 @@ CONDITION_PENALTY_INDEX = {
     "flood_damage": 0.70      # Thủy kích, ngập nước (Trừ 30%)
 }
 
+# ĐÃ SỬA: Dùng đường dẫn tuyệt đối để Render tải được file AI không bị lỗi 500
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODEL_PATH = os.path.join(BASE_DIR, "ml_models", "car_pricing_model.pkl")
 
-MODEL_PATH = "ml_models/car_pricing_model.pkl"
 if os.path.exists(MODEL_PATH):
     model = joblib.load(MODEL_PATH)
 else:
@@ -213,7 +218,17 @@ async def evaluate_and_save_transaction(data: CarValuationRequest):
     # PHẦN 3: LƯU TRỮ DATABASE VÀ TRẢ KẾT QUẢ
     # ==========================================
 
-    # 3.1. Đóng gói dữ liệu chuẩn bị gửi lên Supabase
+    # 3.1. TẠO CHỮ KÝ SỐ BẢO MẬT (CHỐNG SỬA ĐỔI DATABASE)
+    random_salt = uuid.uuid4().hex
+    data_to_protect = {
+        "txhash": data.txhash,
+        "predicted_price": final_predicted_price_vnd,
+        "license_plate": data.license_plate
+    }
+    data_string = json.dumps(data_to_protect, sort_keys=True) + random_salt
+    data_signature = hashlib.sha256(data_string.encode('utf-8')).hexdigest()
+
+    # 3.2. Đóng gói dữ liệu chuẩn bị gửi lên Supabase
     transaction_record = {
         "txhash": data.txhash,
         "predicted_price": final_predicted_price_vnd,  
@@ -224,13 +239,15 @@ async def evaluate_and_save_transaction(data: CarValuationRequest):
         "fuel_type": data.Fuel_type,
         "license_plate": data.license_plate,
         "full_data": data.model_dump(), # JSONB lưu toàn bộ thông tin
-        "user_email": getattr(data, 'user_email', None) or car_data.get('user_email')
+        "user_email": getattr(data, 'user_email', None) or car_data.get('user_email'),
+        "salt": random_salt,              # CỘT MỚI: Sinh ra chuỗi ngẫu nhiên
+        "data_signature": data_signature  # CỘT MỚI: Chữ ký số
     }
 
     print("--- DỮ LIỆU CHUẨN BỊ GỬI LÊN SUPABASE ---")
     print(transaction_record)
 
-    # 3.2. Ghi nhận giao dịch
+    # 3.3. Ghi nhận giao dịch
     try:
         db_response = supabase.table("transactions").insert(transaction_record).execute()
         
@@ -242,7 +259,7 @@ async def evaluate_and_save_transaction(data: CarValuationRequest):
         print(str(e))
         raise HTTPException(status_code=500, detail=f"Lỗi lưu DB: {str(e)}")
 
-    # 3.3. Trả kết quả về cho Frontend
+    # 3.4. Trả kết quả về cho Frontend
     return {
         "status": "success",
         "message": "Đã định giá và ghi nhận giao dịch vào DB",
@@ -253,6 +270,7 @@ async def evaluate_and_save_transaction(data: CarValuationRequest):
             "txhash": data.txhash
         }
     }
+
 @router.get("/{txhash}")
 async def get_transaction_details(txhash: str):
     """
@@ -272,10 +290,32 @@ async def get_transaction_details(txhash: str):
         # Lấy bản ghi đầu tiên tìm được
         record = db_response.data[0]
         
+        # ==========================================
+        # KIỂM TRA TÍNH TOÀN VẸN CỦA DỮ LIỆU
+        # ==========================================
+        stored_salt = record.get("salt")
+        stored_signature = record.get("data_signature")
+        is_tampered = False
+        
+        if stored_salt and stored_signature:
+            current_data = {
+                "txhash": record.get("txhash"),
+                "predicted_price": record.get("predicted_price"),
+                "license_plate": record.get("license_plate")
+            }
+            # Băm lại dữ liệu lấy từ DB
+            current_string = json.dumps(current_data, sort_keys=True) + stored_salt
+            current_signature = hashlib.sha256(current_string.encode('utf-8')).hexdigest()
+            
+            # So sánh mã băm hiện tại với chữ ký lúc mới tạo
+            if current_signature != stored_signature:
+                is_tampered = True
+        
         # Trả về toàn bộ dữ liệu cho Frontend
         return {
             "status": "success",
             "message": "Lấy thông tin xe thành công",
+            "is_tampered": is_tampered, # Gửi cờ báo động về Frontend
             "data": {
                 "id": record.get("id"),
                 "created_at": record.get("created_at"),
@@ -293,4 +333,4 @@ async def get_transaction_details(txhash: str):
         if isinstance(e, HTTPException):
             raise e
         # Bắt các lỗi kết nối DB khác
-        raise HTTPException(status_code=500, detail=f"Lỗi truy xuất dữ liệu: {str(e)}")    
+        raise HTTPException(status_code=500, detail=f"Lỗi truy xuất dữ liệu: {str(e)}")
