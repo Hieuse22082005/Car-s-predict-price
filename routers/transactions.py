@@ -226,7 +226,8 @@ async def evaluate_and_save_transaction(data: CarValuationRequest):
         "license_plate": data.license_plate,
         "full_data": data.model_dump() # <-- CHO TOÀN BỘ JSON VÀO KÉT SẮT
     }
-    data_string = json.dumps(data_to_protect, sort_keys=True) + random_salt
+    SECRET_PEPPER = os.getenv("SECRET_PEPPER", "default_pepper")
+    data_string = json.dumps(data_to_protect, sort_keys=True) + random_salt + SECRET_PEPPER
     data_signature = hashlib.sha256(data_string.encode('utf-8')).hexdigest()
 
     # 3.2. Đóng gói dữ liệu chuẩn bị gửi lên Supabase
@@ -306,7 +307,8 @@ async def get_transaction_details(txhash: str):
                 "full_data": record.get("full_data")
             }
             # Băm lại dữ liệu lấy từ DB
-            current_string = json.dumps(current_data, sort_keys=True) + stored_salt
+            SECRET_PEPPER = os.getenv("SECRET_PEPPER", "default_pepper")
+            current_string = json.dumps(current_data, sort_keys=True) + stored_salt + SECRET_PEPPER
             current_signature = hashlib.sha256(current_string.encode('utf-8')).hexdigest()
             
             # So sánh mã băm hiện tại với chữ ký lúc mới tạo
