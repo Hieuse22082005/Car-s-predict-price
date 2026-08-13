@@ -223,7 +223,8 @@ async def evaluate_and_save_transaction(data: CarValuationRequest):
     data_to_protect = {
         "txhash": data.txhash,
         "predicted_price": final_predicted_price_vnd,
-        "license_plate": data.license_plate
+        "license_plate": data.license_plate,
+        "full_data": data.model_dump() # <-- CHO TOÀN BỘ JSON VÀO KÉT SẮT
     }
     data_string = json.dumps(data_to_protect, sort_keys=True) + random_salt
     data_signature = hashlib.sha256(data_string.encode('utf-8')).hexdigest()
@@ -301,7 +302,8 @@ async def get_transaction_details(txhash: str):
             current_data = {
                 "txhash": record.get("txhash"),
                 "predicted_price": record.get("predicted_price"),
-                "license_plate": record.get("license_plate")
+                "license_plate": record.get("license_plate"),
+                "full_data": record.get("full_data")
             }
             # Băm lại dữ liệu lấy từ DB
             current_string = json.dumps(current_data, sort_keys=True) + stored_salt
