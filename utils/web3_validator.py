@@ -6,7 +6,7 @@ SEPOLIA_RPC = "https://ethereum-sepolia-rpc.publicnode.com"
 w3 = Web3(Web3.HTTPProvider(SEPOLIA_RPC))
 
 # Địa chỉ Contract của bạn
-YOUR_CONTRACT_ADDRESS = "0x6c8af48613a69eB729675eA48CA24c180Df54fAd".lower()
+YOUR_CONTRACT_ADDRESS = "0x2169C854f514516038A068cCF758C2b8D40bCe01".lower()
 
 def verify_transaction(txhash: str, expected_fee_eth: float):
     """
