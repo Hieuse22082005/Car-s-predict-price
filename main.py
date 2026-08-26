@@ -13,7 +13,7 @@ app = FastAPI(
 # Thiết lập CORS để cho phép Frontend kết nối tới Backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Trong môi trường production, hãy thay bằng domain thực tế của Frontend
+    allow_origins=["*"], # Cho phép tất cả các nguồn (hoặc điền cụ thể "http://localhost:3000")
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

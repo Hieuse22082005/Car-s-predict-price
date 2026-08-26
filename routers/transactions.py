@@ -44,10 +44,20 @@ CONDITION_PENALTY_INDEX = {
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_PATH = os.path.join(BASE_DIR, "ml_models", "car_pricing_model.pkl")
 
+# ==========================================
+# BỘ LỌC 1: XỬ LÝ LỖI FILE PKL BỊ LƯU DƯỚI DẠNG DICT
+# ==========================================
 if os.path.exists(MODEL_PATH):
-    model = joblib.load(MODEL_PATH)
+    raw_data = joblib.load(MODEL_PATH)
+    if isinstance(raw_data, dict):
+        model = list(raw_data.values())[0]
+        saved_features = raw_data.get("features", None)
+    else:
+        model = raw_data
+        saved_features = None
 else:
     model = None
+    saved_features = None
 
 PLN_TO_VND_RATE = 7040.57
 
@@ -78,23 +88,44 @@ async def draft_evaluation(data: CarValuationRequest):
 
     # --- BÊ NGUYÊN TOÀN BỘ LOGIC AI VÀ ĐỊNH GIÁ CỦA BẠN VÀO ĐÂY ---
     VIETNAM_CAR_MARKET_PRICE = {
-        "vinfast_vf 5": 468000000,
-        "vinfast_vf 8": 1090000000,
-        "vinfast_vf 9": 1490000000,
-        "vinfast_fadil": 350000000,
-        "vinfast_lux a2.0": 850000000,
-        "toyota_vios": 550000000,
-        "toyota_camry": 1100000000,
-        "honda_city": 550000000,
-        "honda_cr-v": 1050000000,
-        "mazda_cx-5": 850000000,
-        "mazda_mazda 3": 700000000,
-        "ford_ranger": 850000000,
-        "ford_everest": 1200000000
-    }
+            "vinfast_vf 5": 468000000,
+            "vinfast_vf 8": 1090000000,
+            "vinfast_vf 9": 1490000000,
+            "vinfast_fadil": 350000000,
+            "vinfast_lux a2.0": 850000000,
+            "toyota_vios": 550000000,
+            "toyota_camry": 1100000000,
+            "toyota_corolla cross": 850000000, # Đã bổ sung
+            "toyota_innova": 800000000,        # Đã bổ sung
+            "honda_city": 550000000,
+            "honda_cr-v": 1050000000,
+            "mazda_cx-5": 850000000,
+            "mazda_mazda 3": 700000000,
+            "ford_ranger": 850000000,
+            "ford_everest": 1200000000,
+            # THÊM HYUNDAI VÀ CÁC HÃNG KHÁC VÀO ĐÂY:
+            "hyundai_accent": 500000000,
+            "hyundai_tucson": 850000000,
+            "kia_morning": 380000000,
+            "kia_cerato": 600000000,
+            "kia_k3": 600000000,
+            "kia_seltos": 650000000
+        }
 
     car_data = data.model_dump(exclude={"txhash"}) 
-    df_input = pd.DataFrame([car_data])
+    
+    # ==========================================
+    # BỘ LỌC 2: CHỐNG LỖI 'UNHASHABLE LIST' CỦA PANDAS
+    # ==========================================
+    ai_safe_data = {}
+    for key, value in car_data.items():
+        if isinstance(value, (list, dict)):
+            ai_safe_data[key] = str(value) 
+        else:
+            ai_safe_data[key] = value
+            
+    df_input = pd.DataFrame([ai_safe_data])
+    # ==========================================
     
     try:
         car_key = f"{data.Vehicle_brand.lower()}_{data.Vehicle_model.lower()}"
@@ -102,8 +133,31 @@ async def draft_evaluation(data: CarValuationRequest):
         if car_key in VIETNAM_CAR_MARKET_PRICE:
             base_price_vnd = VIETNAM_CAR_MARKET_PRICE[car_key]
         else:
-            predicted_price_pln = model.predict(df_input)[0]
+            # ==========================================
+            # BỘ LỌC 3: CỨU CÁNH AI (CHỐNG LỆCH CỘT VÀ CHỮ TRONG MODEL)
+            # ==========================================
+            # 1. Báo cho Pandas biết AI cần chính xác những cột nào
+            if hasattr(model, "feature_names_in_"):
+                expected_features = model.feature_names_in_
+            elif 'saved_features' in globals() and saved_features is not None:
+                expected_features = saved_features
+            else:
+                expected_features = df_input.columns
+            
+            # 2. PHIÊN DỊCH CHỮ THÀNH SỐ (One-Hot Encoding)
+            df_encoded = pd.get_dummies(df_input)
+            
+            # 3. Tự động cắt gọt: Vứt bỏ cột thừa từ Frontend, tự điền số 0 vào cột thiếu
+            df_aligned = df_encoded.reindex(columns=expected_features, fill_value=0)
+            
+            # 4. CHỐT CHẶN CUỐI CÙNG: Ép TẤT CẢ về dạng số để AI không bị crash!
+            df_aligned = df_aligned.apply(pd.to_numeric, errors='coerce').fillna(0)
+            
+            # 5. Dùng data đã gọt giũa sạch sẽ đưa vào AI dự đoán
+            predicted_price_pln = model.predict(df_aligned)[0]
+            
             base_price_vnd = predicted_price_pln * PLN_TO_VND_RATE
+            # ==========================================
         
         current_year = 2026
         car_age = current_year - data.Production_year
@@ -267,11 +321,65 @@ async def confirm_evaluation(req: ConfirmRequest):
         "data": {
             "predicted_price_raw": req.predicted_price, 
             "predicted_price_display": formatted_price_vnd, 
-            # LỖI SỐ 2 ĐÃ SỬA: Dùng getattr thay vì .get()
             "license_plate": getattr(req.vehicle_data, 'license_plate', None),
             "txhash": req.txhash
         }
     }
+    
+@router.get("/stats")
+async def get_dashboard_stats():
+    try:
+        # 1. SỬA DÒNG NÀY: Xóa chữ 'email' đi, chỉ để lại 'brand' và 'user_email'
+        data = supabase.table('transactions').select('brand, user_email').execute().data
+        
+        total_tx = len(data)
+        brand_map = {}
+        user_map = {}
+
+        for tx in data:
+            b_raw = tx.get('brand') or 'Khác'
+            b = b_raw.strip().lower()
+            if b == 'vinfast': b = 'VinFast'
+            elif b == 'toyota': b = 'Toyota'
+            else: b = b.capitalize()
+            
+            brand_map[b] = brand_map.get(b, 0) + 1
+            
+            # 2. SỬA DÒNG NÀY: Chỉ lấy dữ liệu từ 'user_email'
+            email = tx.get('user_email')
+            if email:
+                user_map[email] = user_map.get(email, 0) + 1
+
+        # 3. Sắp xếp Top 5 Hãng xe
+        brands_array = [
+            {"name": k, "value": v} 
+            for k, v in brand_map.items()
+        ]
+        brands_array = sorted(brands_array, key=lambda x: x['value'], reverse=True)[:5]
+
+        # 4. Sắp xếp Top 3 Người đóng góp
+        users_array = [
+            {"email": k, "name": k.split('@')[0], "count": v} 
+            for k, v in user_map.items()
+        ]
+        users_array = sorted(users_array, key=lambda x: x['count'], reverse=True)[:3]
+
+        # 5. Trả về cục JSON đã "nấu chín" cho Frontend
+        return {
+            "status": "success",
+            "data": {
+                "total_tx": total_tx,
+                "top_brands": brands_array,
+                "top_contributors": users_array
+            }
+        }
+        
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}    
+    
+    
+
+
 
 # ==========================================
 # API 2: LẤY CHI TIẾT GIAO DỊCH (BẢO MẬT)
@@ -351,6 +459,7 @@ async def upgrade_to_vip(req: UpgradeVIPRequest):
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(status_code=500, detail=f"Lỗi cập nhật Database: {str(e)}")
+
 # ==========================================
 # API 4: DÀNH CHO DEV - RESET TÀI KHOẢN VỀ STANDARD
 # ==========================================
@@ -367,59 +476,3 @@ async def reset_vip(req: ResetVIPRequest):
         raise HTTPException(status_code=500, detail=str(e))
     
     
-@router.get("/stats")
-async def get_dashboard_stats():
-    try:
-        # 1. Query lấy toàn bộ data từ bảng transactions (Bạn dùng hàm db có sẵn của bạn)
-        # Ví dụ: response = supabase.table('transactions').select('brand, email, user_email').execute()
-        # data = response.data
-        
-        # GIẢ SỬ ĐÂY LÀ DATA BẠN LẤY TỪ DATABASE LÊN:
-        data = supabase.table('transactions').select('brand, email, user_email').execute().data
-        
-        total_tx = len(data)
-        brand_map = {}
-        user_map = {}
-
-        # 2. Xử lý tính toán, gom nhóm tại Backend
-        for tx in data:
-            # Chuẩn hóa tên hãng xe
-            b_raw = tx.get('brand') or 'Khác'
-            b = b_raw.strip().lower()
-            if b == 'vinfast': b = 'VinFast'
-            elif b == 'toyota': b = 'Toyota'
-            else: b = b.capitalize()
-            
-            brand_map[b] = brand_map.get(b, 0) + 1
-            
-            # Đếm người dùng
-            email = tx.get('email') or tx.get('user_email')
-            if email:
-                user_map[email] = user_map.get(email, 0) + 1
-
-        # 3. Sắp xếp Top 5 Hãng xe
-        brands_array = [
-            {"name": k, "value": v} 
-            for k, v in brand_map.items()
-        ]
-        brands_array = sorted(brands_array, key=lambda x: x['value'], reverse=True)[:5]
-
-        # 4. Sắp xếp Top 3 Người đóng góp
-        users_array = [
-            {"email": k, "name": k.split('@')[0], "count": v} 
-            for k, v in user_map.items()
-        ]
-        users_array = sorted(users_array, key=lambda x: x['count'], reverse=True)[:3]
-
-        # 5. Trả về cục JSON đã "nấu chín" cho Frontend
-        return {
-            "status": "success",
-            "data": {
-                "total_tx": total_tx,
-                "top_brands": brands_array,
-                "top_contributors": users_array
-            }
-        }
-        
-    except Exception as e:
-        return {"status": "error", "detail": str(e)}
