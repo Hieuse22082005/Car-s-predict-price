@@ -365,3 +365,61 @@ async def reset_vip(req: ResetVIPRequest):
         return {"success": True, "message": "Đã reset về Standard"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+    
+@router.get("/stats")
+async def get_dashboard_stats():
+    try:
+        # 1. Query lấy toàn bộ data từ bảng transactions (Bạn dùng hàm db có sẵn của bạn)
+        # Ví dụ: response = supabase.table('transactions').select('brand, email, user_email').execute()
+        # data = response.data
+        
+        # GIẢ SỬ ĐÂY LÀ DATA BẠN LẤY TỪ DATABASE LÊN:
+        data = supabase.table('transactions').select('brand, email, user_email').execute().data
+        
+        total_tx = len(data)
+        brand_map = {}
+        user_map = {}
+
+        # 2. Xử lý tính toán, gom nhóm tại Backend
+        for tx in data:
+            # Chuẩn hóa tên hãng xe
+            b_raw = tx.get('brand') or 'Khác'
+            b = b_raw.strip().lower()
+            if b == 'vinfast': b = 'VinFast'
+            elif b == 'toyota': b = 'Toyota'
+            else: b = b.capitalize()
+            
+            brand_map[b] = brand_map.get(b, 0) + 1
+            
+            # Đếm người dùng
+            email = tx.get('email') or tx.get('user_email')
+            if email:
+                user_map[email] = user_map.get(email, 0) + 1
+
+        # 3. Sắp xếp Top 5 Hãng xe
+        brands_array = [
+            {"name": k, "value": v} 
+            for k, v in brand_map.items()
+        ]
+        brands_array = sorted(brands_array, key=lambda x: x['value'], reverse=True)[:5]
+
+        # 4. Sắp xếp Top 3 Người đóng góp
+        users_array = [
+            {"email": k, "name": k.split('@')[0], "count": v} 
+            for k, v in user_map.items()
+        ]
+        users_array = sorted(users_array, key=lambda x: x['count'], reverse=True)[:3]
+
+        # 5. Trả về cục JSON đã "nấu chín" cho Frontend
+        return {
+            "status": "success",
+            "data": {
+                "total_tx": total_tx,
+                "top_brands": brands_array,
+                "top_contributors": users_array
+            }
+        }
+        
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
