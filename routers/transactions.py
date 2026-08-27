@@ -9,7 +9,12 @@ from utils.web3_validator import verify_transaction
 import hashlib
 import uuid
 import json
-
+from fastapi import UploadFile, File
+import pytesseract
+from PIL import Image
+import io
+import re
+from typing import List
 router = APIRouter()
 
 CITY_PLATE_PREFIXES = [
@@ -476,3 +481,59 @@ async def reset_vip(req: ResetVIPRequest):
         raise HTTPException(status_code=500, detail=str(e))
     
     
+# ==========================================
+# API 5: OCR - ĐỌC GỘP NHIỀU ẢNH CÀ VẸT CÙNG LÚC
+# ==========================================
+@router.post("/extract-cavet")
+async def extract_cavet_info(files: List[UploadFile] = File(...)):
+    print(f"\n--- BẮT ĐẦU TIẾN TRÌNH AI OCR CHO {len(files)} ẢNH ---")
+    try:
+        combined_raw_text = ""
+        pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+
+        # Vòng lặp: Mở từng ảnh ra, ép AI đọc và gộp tất cả chữ lại thành 1 đoạn văn dài
+        for idx, file in enumerate(files):
+            print(f"1. Đang xử lý ảnh thứ {idx + 1}...")
+            contents = await file.read()
+            image = Image.open(io.BytesIO(contents))
+            
+            if image.mode in ("RGBA", "P"):
+                image = image.convert("RGB")
+                
+            raw_text = pytesseract.image_to_string(image, lang='eng', timeout=10)
+            combined_raw_text += raw_text + "\n\n" # Gộp text của các ảnh lại
+            
+        print("--> AI đã đọc xong toàn bộ ảnh! Bắt đầu trích xuất...")
+        
+        # Chạy thuật toán tìm kiếm trên ĐOẠN VĂN TỔNG HỢP
+        matches = re.findall(r'\(([A-Za-z0-9_]+)\)\s*:\s*([^\n]+)', combined_raw_text)
+        
+        extracted_data = {}
+        for key, val in matches:
+            clean_val = val.strip()
+            if clean_val.lower() == 'true': clean_val = True
+            elif clean_val.lower() == 'false': clean_val = False
+            elif clean_val.isdigit(): clean_val = int(clean_val)
+            extracted_data[key] = clean_val
+
+        # Cứu cánh cho biển số
+        if "license_plate" not in extracted_data:
+            plate_match = re.search(r'([0-9]{2}[A-Z]{1,2}\s*-\s*[0-9]{3,4}\.?[0-9]{2})', combined_raw_text)
+            if plate_match:
+                extracted_data["license_plate"] = plate_match.group(1).replace(" ", "")
+
+        print(f"4. Trích xuất thành công {len(extracted_data)} trường dữ liệu từ {len(files)} ảnh!")
+        print("----------------------------------\n")
+
+        return {
+            "status": "success",
+            "message": "Trích xuất thành công",
+            "data": extracted_data,
+            "raw_text": combined_raw_text
+        }
+    except RuntimeError as timeout_err:
+        print("❌ LỖI: Tesseract bị treo quá 10s!")
+        return {"status": "error", "detail": "Quá trình xử lý ảnh mất quá nhiều thời gian."}
+    except Exception as e:
+        print("❌ LỖI NGHIÊM TRỌNG:", str(e))
+        return {"status": "error", "detail": f"Lỗi đọc ảnh: {str(e)}"}
