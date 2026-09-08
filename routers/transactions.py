@@ -310,6 +310,7 @@ async def confirm_evaluation(req: ConfirmRequest):
         "license_plate": getattr(req.vehicle_data, 'license_plate', None),
         "full_data": car_data_dict,
         "user_email": user_email,
+        "user_signature": getattr(req.vehicle_data, 'user_signature', None),
         "salt": req.salt,              
         "data_signature": req.carHash 
     }
@@ -431,6 +432,8 @@ async def get_certificate(txhash: str):
             "txhash": record.get('txhash'),
             "predicted_price_vnd": record.get('predicted_price'),
             "license_plate": record.get('license_plate'),
+            "user_signature": record.get('user_signature'),
+            "user_email": record.get('user_email'),
             "original_car_info": raw_full_data
         }
     }

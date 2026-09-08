@@ -31,9 +31,12 @@ class CarValuationRequest(BaseModel):
     ev_battery_type: str = "none"
     license_plate: str = "Chưa có biển"
     user_email: Optional[str] = None
+    user_signature: Optional[str] = None
     
     model_config = {"extra": "allow"}
 class UserAuth(BaseModel):
     email: str
     password: str
     
+class ChatRequest(BaseModel):
+    message: str
