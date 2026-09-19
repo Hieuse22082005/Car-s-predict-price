@@ -4,3 +4,4 @@
 *\__pycache__
 car_pricing_model.pkl
 *.pkl
+.env.local
