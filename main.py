@@ -4,7 +4,7 @@ from routers import  auth
 # Import các router từ thư mục routers
 from routers import transactions
 from routers import fines
-from routers import auth, fines, transactions, chat, cars # I
+from routers import auth, fines, transactions, chat, cars, bookings # I
 app = FastAPI(
     title="Hệ Thống Định Giá Xe",
     description="Backend API tích hợp AI định giá và Blockchain",
@@ -29,6 +29,7 @@ app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
 app.include_router(fines.router, prefix="/api/v1/fines", tags=["Fines"])
 app.include_router(chat.router, prefix="/api", tags=["Chat AI"])
 app.include_router(cars.router, prefix="/api/v1/cars", tags=["Cars"])
+app.include_router(bookings.router, prefix="/api/v1/bookings", tags=["Bookings"])
 # Ví dụ sau này bạn muốn làm thêm chức năng User, bạn chỉ cần tạo file routers/users.py và thêm:
 # from routers import users
 # app.include_router(users.router, prefix="/api/v1/users", tags=["Users"])
