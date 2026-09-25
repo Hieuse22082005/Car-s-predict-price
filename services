@@ -1,0 +1,111 @@
+﻿import asyncio
+from web3 import Web3
+import os
+from supabase import create_client, Client
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("relayer_worker")
+
+# Setup Web3 & Contract
+SEPOLIA_RPC_URL = os.getenv("SEPOLIA_RPC_URL", "https://sepolia.infura.io/v3/YOUR-PROJECT-ID")
+ADMIN_KEY = os.getenv("ADMIN_PRIVATE_KEY")
+CONTRACT_ADDR = os.getenv("CONTRACT_ADDRESS")
+
+# Initialize Supabase client
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+MAX_GAS_PRICE_GWEI = 50  # Chặn không gửi giao dịch nếu mạng lưới tăng phí quá cao
+
+# Minimal ABI required to call payForValuation(string)
+CONTRACT_ABI = [
+    {
+        "inputs": [{"internalType": "string", "name": "dataSignature", "type": "string"}],
+        "name": "payForValuation",
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function"
+    }
+]
+
+async def process_blockchain_queue():
+    logger.info("Khởi động Relayer Worker ngầm...")
+    
+    if not ADMIN_KEY or not CONTRACT_ADDR:
+        logger.warning("Chưa cấu hình ADMIN_PRIVATE_KEY hoặc CONTRACT_ADDRESS trong .env. Worker sẽ tạm ngưng.")
+        return
+
+    w3 = Web3(Web3.HTTPProvider(SEPOLIA_RPC_URL))
+    if not w3.is_connected():
+        logger.error("Không thể kết nối với mạng lưới Sepolia (RPC URL sai).")
+        return
+
+    ADMIN_ADDR = w3.eth.account.from_key(ADMIN_KEY).address
+    contract = w3.eth.contract(address=CONTRACT_ADDR, abi=CONTRACT_ABI)
+
+    while True:
+        try:
+            # Lấy bản ghi đang xếp hàng chờ ký
+            pending = supabase.table("transactions")\
+                .select("id, car_signature")\
+                .eq("chain_status", "QUEUED")\
+                .order("created_at")\
+                .limit(1)\
+                .execute()
+                
+            if pending.data:
+                item = pending.data[0]
+                current_gas = w3.eth.gas_price
+                
+                # Tránh rủi ro biến động giá gas
+                if current_gas > w3.to_wei(MAX_GAS_PRICE_GWEI, 'gwei'):
+                    logger.warning(f"Gas quá cao ({w3.from_wei(current_gas, 'gwei')} gwei). Đang chờ...")
+                    await asyncio.sleep(10)
+                    continue
+                
+                logger.info(f"Đang xử lý giao dịch ID: {item['id']}")
+                
+                # Đánh dấu trạng thái đang thực thi (ngăn chặn worker khác lấy)
+                supabase.table("transactions").update({"chain_status": "MINING"}).eq("id", item["id"]).execute()
+                
+                nonce = w3.eth.get_transaction_count(ADMIN_ADDR, 'pending')
+                tx = contract.functions.payForValuation(item["car_signature"]).build_transaction({
+                    'from': ADMIN_ADDR,
+                    'value': w3.to_wei(0.001, 'ether'), # Giá trị cố định hoặc tùy biến
+                    'nonce': nonce,
+                    'gas': 300000,
+                    'gasPrice': current_gas
+                })
+                
+                signed = w3.eth.account.sign_transaction(tx, private_key=ADMIN_KEY)
+                tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction).hex()
+                logger.info(f"Đã gửi giao dịch. TxHash: {tx_hash}")
+                
+                # Cập nhật txhash tạm thời
+                supabase.table("transactions").update({
+                    "txhash": tx_hash
+                }).eq("id", item["id"]).execute()
+
+                # Chờ xác nhận tối thiểu 1 block từ thợ mỏ
+                receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+                
+                if receipt.status == 1:
+                    logger.info(f"Giao dịch THÀNH CÔNG: {tx_hash}")
+                    supabase.table("transactions").update({
+                        "chain_status": "SUCCESS"
+                    }).eq("id", item["id"]).execute()
+                else:
+                    logger.error(f"Giao dịch THẤT BẠI: {tx_hash}")
+                    supabase.table("transactions").update({"chain_status": "FAILED"}).eq("id", item["id"]).execute()
+            else:
+                # Không có giao dịch chờ, nghỉ 3 giây
+                await asyncio.sleep(3)
+                
+        except Exception as e:
+            logger.error(f"Lỗi trong quá trình ký blockchain: {e}")
+            # Đưa về lại QUEUED nếu lỗi không phải do đã thành công
+            if 'item' in locals():
+                supabase.table("transactions").update({"chain_status": "QUEUED"}).eq("id", item["id"]).execute()
+            await asyncio.sleep(5)

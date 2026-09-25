@@ -1,0 +1,87 @@
+=====
+@router.post("/evaluate/confirm")
+async def confirm_evaluation(req: ConfirmRequest):
+    # LỖI SỐ 1 ĐÃ SỬA: Dùng getattr thay vì .get()
+    user_email = getattr(req.vehicle_data, 'user_email', None)
+    expected_fee = 0.001 
+    
+    # 1. KIỂM TRA QUYỀN VIP TỪ SUPABASE ĐỂ ÁP DỤNG PHÍ GAS
+    if user_email:
+        try:
+            profile_res = supabase.table("profiles").select("tier").eq("email", user_email).execute()
+            if profile_res.data and len(profile_res.data) > 0:
+                if profile_res.data[0].get("tier") == "vip":
+                    expected_fee = 0.0 
+        except Exception as e:
+            print(f"Lỗi kiểm tra tier của user {user_email}: {e}")
+
+    # 1.1. CHỐT CHẶN 1: KIỂM TRA THANH TOÁN TRÊN BLOCKCHAIN
+    is_paid = verify_transaction(req.txhash, expected_fee)
+    if not is_paid:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Giao dịch không hợp lệ, hoặc không đủ {expected_fee} ETH phí!"
+        )
+
+    # 1.2. CHỐT CHẶN 2: CHỐNG REPLAY ATTACK (KIỂM TRA TXHASH ĐÃ DÙNG CHƯA)
+    db_check = supabase.table("transactions").select("txhash").eq("txhash", req.txhash).execute()
+    if len(db_check.data) > 0:
+        raise HTTPException(status_code=400, detail="Mã giao dịch này đã được sử dụng để định giá rồi!")
+
+    # 1.3. CHỐT CHẶN TỐI THƯỢNG: KIỂM TRA TÍNH TOÀN VẸN DỮ LIỆU BẰNG HASH
+    car_data_dict = req.vehicle_data.model_dump(exclude={"txhash"})
+    
+    data_to_verify = {
+        "predicted_price": int(req.predicted_price), # Ép thẳng về int giống hệt lúc Draft
+        "license_plate": getattr(req.vehicle_data, 'license_plate', None),
+        "full_data": car_data_dict
+    }
+    
+    SECRET_PEPPER = os.getenv("SECRET_PEPPER", "default_pepper")
+    data_string = json.dumps(data_to_verify, sort_keys=True) + req.salt + SECRET_PEPPER
+    recalculated_hash = hashlib.sha256(data_string.encode('utf-8')).hexdigest()
+
+    if recalculated_hash != req.carHash:
+         print("Hash gốc (Draft):", req.carHash)
+         print("Hash tính lại (Confirm):", recalculated_hash)
+         raise HTTPException(
+             status_code=400, 
+             detail="CẢNH BÁO: Dữ liệu xe hoặc giá đã bị đánh tráo giữa đường truyền!"
+         )
+
+    # ==========================================
+    # PHẦN 3: LƯU TRỮ DATABASE VÀ TRẢ KẾT QUẢ
+    # ==========================================
+    transaction_record = {
+        "txhash": req.txhash,
+        "predicted_price": req.predicted_price,  
+        "brand": req.vehicle_data.Vehicle_brand, 
+        "model": req.vehicle_data.Vehicle_model,
+        "year": int(req.vehicle_data.Production_year),
+        "mileage": int(req.vehicle_data.Mileage_km), 
+        "fuel_type": req.vehicle_data.Fuel_type,
+        "license_plate": getattr(req.vehicle_data, 'license_plate', None),
+        "full_data": car_data_dict,
+        "user_email": user_email,
+        "user_signature": getattr(req.vehicle_data, 'user_signature', None),
+        "salt": req.salt,              
+        "data_signature": req.carHash 
+    }
+
+    try:
+        supabase.table("transactions").insert(transaction_record).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi lưu DB: {str(e)}")
+
+    formatted_price_vnd = f"{int(req.predicted_price):,}".replace(',', '.') + " VNĐ"
+    return {
+        "status": "success",
+        "message": "Đã định giá và ghi nhận giao dịch vào DB",
+        "data": {
+            "predicted_price_raw": req.predicted_price, 
+            "predicted_price_display": formatted_price_vnd, 
+            "license_plate": getattr(req.vehicle_data, 'license_plate', None),
+            "txhash": req.txhash
+        }
+    }
+    
